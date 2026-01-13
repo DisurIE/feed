@@ -1,22 +1,18 @@
-## **Техническое задание (ТЗ)**
 
-### **Feed-сервис с CQRS, SSO, PostgreSQL и полной системой тестирования**
-
----
+# Техническое задание
 
 ## **1. Цель проекта**
 
-Разработать высоконагруженный backend-сервис ленты (feed), аналогичный Instagram/Twitter, с использованием PHP и современной backend-архитектуры.
+Создать высоконагруженный backend-сервис ленты (feed) на PHP (Laravel/Symfony) с:
 
-Сервис должен:
-
-* поддерживать CQRS (разделение чтения и записи),
-* использовать PostgreSQL как основную БД (и для приложения, и для тестов),
-* иметь асинхронную обработку через очередь,
-* поддерживать SSO-авторизацию,
-* быть полностью покрыт автотестами,
-* позволять локально симулировать высокую нагрузку,
-* **разворачиваться локально одной командой**.
+* CQRS (разделение чтения и записи),
+* PostgreSQL (write + read модель),
+* Redis (кэш),
+* RabbitMQ/Kafka (очереди),
+* SSO (OAuth2 / OpenID Connect),
+* полной системой автотестов,
+* возможностью локально симулировать миллион пользователей и нагрузку,
+* быстрым локальным разворачиванием и запуском всех тестов одной командой через Taskfile.
 
 ---
 
@@ -24,22 +20,21 @@
 
 ### **2.1 Пользователи**
 
-* Аутентификация через SSO (OAuth2 / OpenID Connect)
-* Поддержка нескольких провайдеров (минимум 1, например Google или GitHub)
+* Аутентификация через SSO (OAuth2/OpenID Connect)
+* Поддержка минимум одного внешнего провайдера (Google/GitHub)
+* JWT для авторизации API
+* Refresh token для долгосрочного использования
 * Создание пользователя при первом входе через SSO
-* Подписка / отписка на других пользователей
+* Подписка/отписка на других пользователей
 * Получение персонального feed
-
----
 
 ### **2.2 Посты**
 
 * Создание поста (текст)
 * Лайк / анлайк поста
-* Пост является immutable (редактирование не требуется)
-* Все изменения проходят через Command-часть CQRS
-
----
+* Пост immutable (редактирование не требуется)
+* Все операции проходят через Command-часть CQRS
+* Идентификаторы команд имеют idempotency ключи
 
 ### **2.3 Feed**
 
@@ -47,7 +42,7 @@
 * Сортировка по времени (desc)
 * Пагинация / infinite scroll
 * Eventual consistency допускается
-* Быстрая выдача данных (оптимизированная read-model)
+* Быстрая выдача через read-model и Redis cache
 
 ---
 
@@ -55,206 +50,158 @@
 
 ### **3.1 CQRS**
 
-* **Write Side**
+* **Write Side (Command)**
 
-    * Команды: `CreatePost`, `LikePost`, `FollowUser`
+    * `CreatePostCommand`, `LikePostCommand`, `FollowUserCommand`
     * Source of truth — write-таблицы PostgreSQL
 * **Events**
 
-    * `PostCreated`, `PostLiked`, `UserFollowed`
-* **Read Side**
+    * `PostCreatedEvent`, `PostLikedEvent`, `UserFollowedEvent`
+    * Асинхронная обработка воркером
+* **Read Side (Query)**
 
-    * Отдельная read-model для feed (`user_feed`)
-    * Оптимизирована под чтение
+    * Таблица `user_feed` для быстрого чтения
+    * Redis cache для последних N постов
 * **Worker**
 
-    * Асинхронно обрабатывает события
-    * Обновляет read-model и кэш
-
----
+    * Асинхронная обработка событий
+    * Обновление read-model и кэша
+    * Retry с backoff, dead-letter queue, idempotency
 
 ### **3.2 База данных**
 
-* PostgreSQL
-* Используется:
-
-    * в приложении
-    * в unit / integration / e2e тестах
-    * в нагрузочных сценариях
+* PostgreSQL для write и read моделей
 * Основные таблицы:
 
-    * `users`
-    * `posts`
-    * `follows`
-    * `likes`
-    * `user_feed` (read-model)
-
----
+    * `users`, `posts`, `follows`, `likes`, `user_feed`
+* Read-model оптимизирована под быстрые SELECT
+* Возможность логического шардирования пользователей
+* Отдельная тестовая база PostgreSQL для автотестов
 
 ### **3.3 Очереди**
 
 * RabbitMQ или Kafka
-* Используется для:
-
-    * fan-out постов в feed подписчиков
-    * асинхронной обработки
-* Поддержка:
-
-    * retry
-    * idempotency
-    * dead-letter queue
-
----
+* Fan-out при публикации постов
+* Retry, backoff, dead-letter queue
+* Обработка всех событий через воркеры
 
 ### **3.4 Кэш**
 
 * Redis
-* Используется для:
-
-    * кэша feed пользователя
-    * популярных постов
-    * (опционально) rate limiting
-* Поддержка TTL и инвалидации
+* Кэш последних N постов пользователя
+* Кэш популярных постов
+* TTL и логика инвалидации
+* Возможность rate limiting
 
 ---
 
-### **3.5 Авторизация (SSO)**
+## **4. Тестирование**
 
-* OAuth2 / OpenID Connect
-* Access Token используется для авторизации API
-* Возможность мокать SSO для тестов
+### **4.1 Unit**
 
----
+* Бизнес-логика Command и Query сервисов
+* Модели: User, Post, Follow, Like
 
-## **4. Нефункциональные требования**
+### **4.2 Integration**
 
-### **4.1 Производительность**
+* API + PostgreSQL + Redis + Queue + Worker
+* Проверка CQRS pipeline: Command → Event → Read-model → Query
 
-* Оптимизация чтения feed
-* Минимизация JOIN-ов в горячих запросах
-* Поддержка горизонтального масштабирования (логически)
-
----
-
-### **4.2 Масштабируемость**
-
-* Возможность симуляции:
-
-    * 1 000 000 пользователей
-    * 10 000 000 постов
-    * десятков тысяч RPS
-* Поддержка асинхронных операций
-
----
-
-## **5. Тестирование**
-
-### **5.1 Unit-тесты**
-
-* Бизнес-логика команд
-* Доменные сервисы
-* Query-сервисы
-
-### **5.2 Integration-тесты**
-
-* API + PostgreSQL
-* API + Redis
-* API + Queue + Worker
-* CQRS pipeline (Command → Event → Read-model)
-
-### **5.3 Functional / E2E**
+### **4.3 Functional / E2E**
 
 * SSO login → создание пользователя
 * Создание поста → обновление feed подписчиков
 * Получение feed через API
 
-### **5.4 Нагрузочное тестирование**
+### **4.4 Load testing**
 
-* Генерация:
+* Симуляция:
 
-    * GET `/feed`
-    * POST `/posts`
+    * GET `/feed` (основной сценарий)
+    * POST `/posts` (fan-out)
     * POST `/likes`
-* Метрики:
-
-    * RPS
-    * latency (p95, p99)
-    * error rate
-    * queue backlog
-    * cache hit/miss
+* Метрики: latency (p95/p99), RPS, error rate, queue backlog, cache hit/miss
+* Запуск нагрузочного теста через Docker контейнер, интегрированный с Taskfile
 
 ---
 
-## **6. Локальный запуск и DX (Developer Experience)**
+## **5. Локальный запуск / Developer Experience**
 
-### **6.1 Быстрый старт**
+### **5.1 Быстрый старт**
 
-* Проект должен полностью подниматься **одной командой**
-* Используется Docker + Docker Compose
-* Все зависимости поднимаются автоматически:
+* Полное разворачивание инфраструктуры одной командой (`task up`)
+* Все сервисы поднимаются через Docker Compose:
 
     * PHP API
     * PostgreSQL
     * Redis
-    * Queue
+    * RabbitMQ/Kafka
     * Worker
-    * Load-testing сервис
+    * Load generator (k6/JMeter)
+
+### **5.2 Taskfile команды**
+
+* `task up` — поднять всю инфраструктуру
+* `task down` — остановить
+* `task seed` — загрузка тестовых и больших данных
+* `task test` — запуск всех тестов
+* `task test:unit` — unit-тесты
+* `task test:integration` — integration-тесты
+* `task test:e2e` — functional / E2E
+* `task test:load` — нагрузочное тестирование
+* Возможность запускать нагрузку в Docker, без конфликтов с локальной средой
 
 ---
 
-### **6.2 Task Runner**
+## **6. Нефункциональные требования**
 
-* Используется **Taskfile**
-* Обязательные команды:
+### **6.1 Производительность**
 
-    * `task up` — поднять всю инфраструктуру
-    * `task down` — остановить
-    * `task test` — все тесты
-    * `task test:unit`
-    * `task test:integration`
-    * `task test:e2e`
-    * `task test:load`
-    * `task seed` — загрузка тестовых / больших данных
+* Быстрая выдача feed через read-model и Redis
+* Минимизация JOIN-ов
+* Eventual consistency допустима
 
----
+### **6.2 Масштабируемость**
 
-### **6.3 Тесты и нагрузка в Docker**
+* Легкое логическое шардирование
+* Возможность горизонтального масштабирования Worker’ов и API
 
-* Все тесты должны запускаться **в контейнерах**
-* PostgreSQL используется реальный (не SQLite)
-* Нагрузочное тестирование:
+### **6.3 Мониторинг (опционально для senior)**
 
-    * запускается как отдельный Docker-контейнер
-    * не требует ручной настройки
-    * интегрировано в Taskfile
-* Возможность запускать нагрузку против локального стенда без конфликтов
+* Метрики:
+
+    * Worker processing time
+    * Queue backlog
+    * Cache hit/miss
+    * Latency и RPS API
+* Возможность интеграции с Prometheus/Grafana или вывод логов в JSON для анализа
 
 ---
 
 ## **7. Tech Stack**
 
-* PHP 8+
-* Laravel или Symfony
-* PostgreSQL
-* Redis
-* RabbitMQ или Kafka
-* OAuth2 / OpenID Connect
+* Backend: PHP 8+, Laravel или Symfony
+* DB: PostgreSQL
+* Cache: Redis
+* Queue: RabbitMQ / Kafka
+* Auth: OAuth2 / OpenID Connect
 * Docker / Docker Compose
-* Taskfile
-* PHPUnit или Pest
-* k6 или JMeter (в Docker)
+* Taskfile для управления локальной средой и тестами
+* Testing: PHPUnit / Pest
+* Load testing: k6 / JMeter (Docker)
+* Optional: Prometheus/Grafana для мониторинга
 
 ---
 
 ## **8. Результат**
 
-В результате должен быть получен:
-
-* полностью рабочий feed-сервис,
-* с CQRS и асинхронной архитектурой,
-* SSO-авторизацией,
-* полной системой автотестов,
-* возможностью локально симулировать высокую нагрузку,
-* удобным запуском и тестированием одной командой.
+* Полностью рабочее feed-приложение
+* CQRS с разделением Command / Query
+* Асинхронная обработка через очереди и Worker
+* Redis-кэш и PostgreSQL read-model
+* SSO-авторизация
+* Полное покрытие автотестами (unit, integration, E2E)
+* Возможность локально запускать нагрузку и тесты одной командой
+* Документация архитектуры и trade-offs
 
 ---
